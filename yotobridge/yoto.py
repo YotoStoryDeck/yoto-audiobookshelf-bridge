@@ -424,7 +424,7 @@ class YotoControl:
 
     async def connect(self, device_ids: list[str]):
         from yoto_api.mqtt.client import YotoMqttClient
-        from yoto_api.models.event import EventPatch, PresenceEvent
+        from yoto_api.models.event import EventPatch, PresenceEvent, StatusPatch
 
         if self.client:
             await self.client.disconnect()
@@ -447,7 +447,17 @@ class YotoControl:
                 ev = {"cardId": f.get("card_id"), "position": f.get("position"), "trackLength": f.get("track_length"),
                       "playbackStatus": getattr(f.get("playback_status"), "value", f.get("playback_status")),
                       "source": f.get("source"), "streaming": f.get("streaming"), "trackKey": f.get("track_key"),
-                      "chapterKey": f.get("chapter_key"), "chapterTitle": f.get("chapter_title"), "trackTitle": f.get("track_title")}
+                      "chapterKey": f.get("chapter_key"), "chapterTitle": f.get("chapter_title"), "trackTitle": f.get("track_title"),
+                      "volume": f.get("volume"), "volume_max": f.get("volume_max")}
+                self.on_event(msg.player_id, {k: v for k, v in ev.items() if v is not None})
+            elif isinstance(msg, StatusPatch):
+                if self.on_presence:
+                    self.on_presence(msg.player_id, True)
+                f = msg.fields or {}
+                ev = {"user_volume_percentage": f.get("user_volume_percentage"),
+                      "system_volume_percentage": f.get("system_volume_percentage"),
+                      "day_mode": f.get("day_mode"),
+                      "battery_level_percentage": f.get("battery_level_percentage")}
                 self.on_event(msg.player_id, {k: v for k, v in ev.items() if v is not None})
 
         await self.client.connect(None, device_ids, cb, token_getter=self.auth.access_token)

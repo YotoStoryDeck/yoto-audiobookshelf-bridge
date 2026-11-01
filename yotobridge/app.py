@@ -821,6 +821,29 @@ async def api_status(request):
                 else:
                     now_playing = "Yoto Card"
 
+        # Compute volume and volume_max percentage (scaled to 0-100)
+        # Yoto EventPatch sends raw steps (e.g. 0-16 or 0-10) or user_volume_percentage (0-100)
+        raw_vol = ev.get("volume")
+        raw_vol_max = ev.get("volume_max")
+        user_vol_pct = ev.get("user_volume_percentage")
+        
+        # Determine maximum volume ceiling percentage
+        max_vol_pct = 100
+        if raw_vol_max is not None and raw_vol_max > 0:
+            # If volume_max is on a 0-16 scale (common for Yoto hardware):
+            if raw_vol_max <= 16:
+                max_vol_pct = int(round((raw_vol_max / 16.0) * 100))
+            else:
+                max_vol_pct = min(100, int(raw_vol_max))
+
+        # Current volume percentage
+        cur_vol_pct = user_vol_pct
+        if cur_vol_pct is None and raw_vol is not None:
+            if raw_vol_max and raw_vol_max <= 16:
+                cur_vol_pct = int(round((raw_vol / 16.0) * 100))
+            else:
+                cur_vol_pct = min(100, int(raw_vol))
+
         devices.append({"id": did, "name": br.device_name(did), "online": d.get("online"),
                         "status": ev.get("playbackStatus"),
                         "now_playing": now_playing, "item_id": item_id,
@@ -828,7 +851,12 @@ async def api_status(request):
                         "position": position,
                         "duration": duration,
                         "speed": float(br.store.state.speeds.get(did, 1.0)),
-                        "playing_speed": playing_speed})
+                        "playing_speed": playing_speed,
+                        "volume": cur_vol_pct,
+                        "volume_max": max_vol_pct,
+                        "raw_volume": raw_vol,
+                        "raw_volume_max": raw_vol_max,
+                        "day_mode": ev.get("day_mode")})
     return web.json_response({
         "yoto_logged_in": br.auth.logged_in, "yoto_client_id_set": bool(br.cfg.yoto_client_id),
         "login_pending": br.auth.pending if br.auth.pending and br.auth.pending["expires_at"] > time.time() else None, "mqtt": br.control.connected, "devices": devices,
