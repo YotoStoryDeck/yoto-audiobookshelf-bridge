@@ -1081,12 +1081,35 @@ async def api_play(request):
     if not br.control.connected:
         raise web.HTTPServiceUnavailable(text="Not connected to Yoto (MQTT). Connect Yoto first.")
 
-    # 1. Native Yoto Card Playback (Retail cards or MYO cards)
+    # 1. Native Yoto Card Playback (Retail cards, MYO cards, Podcasts, Radio)
     if card_id and not item_id:
+        chapter_key = body.get("chapter_key") or body.get("chapterKey")
+        track_key = body.get("track_key") or body.get("trackKey")
+        
+        # If no explicit track_key provided for non-standard cards (podcasts, radio), attempt resolution
+        if not track_key or not chapter_key:
+            try:
+                card_data = await br.yoto.card_detail(card_id)
+                if card_data:
+                    c_obj = card_data.get("content") or card_data.get("card", {}).get("content") or {}
+                    chaps = c_obj.get("chapters", [])
+                    if chaps:
+                        target_ch_idx = max(0, track - 1)
+                        if target_ch_idx < len(chaps):
+                            ch_target = chaps[target_ch_idx]
+                            chapter_key = chapter_key or ch_target.get("key")
+                            tracks_list = ch_target.get("tracks", [])
+                            if tracks_list:
+                                track_key = track_key or tracks_list[0].get("key")
+                            else:
+                                track_key = track_key or ch_target.get("key")
+            except Exception as e:
+                log.debug("Notice resolving keys for card %s: %s", card_id, e)
+
         br.pm.expect(device_id, card_id)
-        await br.control.play(device_id, card_id, None, track=track)
-        log.info("Commanded Yoto %s to play card %s on track %d via MQTT", device_id, card_id, track)
-        return web.json_response({"ok": True, "type": "yoto", "card_id": card_id, "track": track, "device_id": device_id})
+        await br.control.play(device_id, card_id, None, track=track, chapter_key=chapter_key, track_key=track_key)
+        log.info("Commanded Yoto %s to play card %s (ch=%s, trk=%s, trackIdx=%d) via MQTT", device_id, card_id, chapter_key, track_key, track)
+        return web.json_response({"ok": True, "type": "yoto", "card_id": card_id, "track": track, "chapter_key": chapter_key, "track_key": track_key, "device_id": device_id})
 
     # 2. Audiobookshelf Book Playback
     if not item_id:

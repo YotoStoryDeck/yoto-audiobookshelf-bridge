@@ -466,10 +466,11 @@ class YotoControl:
     def uri(self, card_id: str) -> str:
         return self.uri_format.format(card_id=card_id)
 
-    async def play(self, device_id: str, card_id: str, seconds_in: int | None = None, track: int = 1):
-        # Same payload as yoto-api's card_play, but with the uri format configurable (unverified point).
-        key = f"{max(1, int(track)):02d}"
-        payload: dict = {"uri": self.uri(card_id), "chapterKey": key, "trackKey": key}
+    async def play(self, device_id: str, card_id: str, seconds_in: int | None = None, track: int = 1, chapter_key: str | None = None, track_key: str | None = None):
+        # Support podcasts, radio streams, and standard audio cards
+        chap_k = chapter_key if chapter_key else f"{max(1, int(track)):02d}"
+        trk_k = track_key if track_key else chap_k
+        payload: dict = {"uri": self.uri(card_id), "chapterKey": chap_k, "trackKey": trk_k}
         if seconds_in is not None:
             payload["secondsIn"] = int(seconds_in)
         await self.client._publish(f"device/{device_id}/command/card/start", json.dumps(payload))
