@@ -1926,6 +1926,7 @@ def make_app(br: Bridge) -> web.Application:
     r.add_put("/api/yoto/card/{card_id}", api_yoto_update_card)
     r.add_post("/api/yoto/icons/upload", api_yoto_upload_icon)
     r.add_post("/api/yoto/volume", api_device_volume)
+    r.add_post("/api/device/volume", api_device_volume)
     r.add_get("/api/book/{item}", api_book)
     r.add_get("/api/libraries", api_libraries)
     r.add_get("/api/books", api_books)
