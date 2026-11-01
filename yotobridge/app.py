@@ -57,7 +57,7 @@ class Bridge:
         self.icon_library = IconLibrary(self.yoto, cfg.data_dir)
         self.ai = AIPictures(self, AISettings.parse(cfg.ai_pictures))
         self.pm = PlaybackManager(cfg, self.abs, self.store)
-        factory = control_factory or (lambda: YotoControl(self.auth, cfg.card_uri_format, self.on_yoto_event))
+        factory = control_factory or (lambda: YotoControl(self.auth, cfg.card_uri_format, self.on_yoto_event, self.on_yoto_presence))
         self.control = factory()
         self.pm.control = self.control
         self.pm.encoder = self.encoder
@@ -428,7 +428,14 @@ class Bridge:
         await self.save_playlist(slot)
         return slot
 
+    def on_yoto_presence(self, device_id: str, is_online: bool):
+        for d in self.yoto_devices:
+            if d.get("deviceId") == device_id or d.get("id") == device_id:
+                d["online"] = bool(is_online)
+                break
+
     def on_yoto_event(self, device_id: str, ev: dict):
+        self.on_yoto_presence(device_id, True)
         self.pm.on_event(device_id, ev)
         self.offline.on_event(device_id, self.pm.devices.get(device_id, {}))
         if self.transfer:
@@ -1110,6 +1117,42 @@ async def api_seek(request):
         raise web.HTTPServiceUnavailable(text="Not connected to Yoto (MQTT). Connect Yoto first.")
     pb = br.pm.current_on(device_id)
     if not pb:
+        # Check if a retail or native Yoto card is active on this player
+        ev = br.pm.devices.get(device_id, {})
+        card_id = ev.get("cardId")
+        if card_id and card_id not in ("none", ""):
+            card_info = br._yoto_card_cache.get(card_id)
+            if not card_info:
+                try:
+                    card_info = await br.yoto.card_detail(card_id)
+                    if card_info:
+                        br._yoto_card_cache[card_id] = card_info
+                except Exception as ce:
+                    log.debug("Seek card_detail query notice: %s", ce)
+
+            chs = (card_info or {}).get("content", {}).get("chapters", [])
+            total_chs = len(chs)
+            curr_key = ev.get("chapterKey") or ev.get("trackKey") or "01"
+            try:
+                curr_track = int(curr_key)
+            except Exception:
+                curr_track = 1
+
+            if action == "next":
+                new_track = curr_track + 1
+                if total_chs and new_track > total_chs:
+                    raise web.HTTPConflict(text="Already in the last chapter.")
+            elif action == "prev":
+                pos = float(ev.get("position") or 0)
+                new_track = curr_track if pos > 5.0 else max(1, curr_track - 1)
+            else:
+                raise web.HTTPConflict(text=f"Time scrubbing ({action}) is unsupported on physical Yoto retail cards.")
+
+            br.pm.expect(device_id, card_id)
+            await br.control.play(device_id, card_id, None, track=new_track)
+            log.info("Seek %s on retail card %s: moved to track %d on %s", action, card_id, new_track, br.device_name(device_id))
+            return web.json_response({"ok": True, "type": "yoto", "card_id": card_id, "track": new_track, "device_id": device_id})
+
         raise web.HTTPConflict(text=f"Nothing from the bridge is playing on {br.device_name(device_id)}.")
     slot = br.store.get(pb.slot)
     book, at = br.pm.book_position(pb)

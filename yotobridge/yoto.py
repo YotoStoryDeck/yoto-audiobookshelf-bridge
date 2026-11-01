@@ -409,10 +409,12 @@ class YotoAPI:
 class YotoControl:
     """MQTT: send play/pause commands and receive playback events for every player on the account."""
 
-    def __init__(self, auth: YotoAuth, uri_format: str, on_event: Callable[[str, dict], None]):
+    def __init__(self, auth: YotoAuth, uri_format: str, on_event: Callable[[str, dict], None],
+                 on_presence: Callable[[str, bool], None] | None = None):
         self.auth = auth
         self.uri_format = uri_format
         self.on_event = on_event
+        self.on_presence = on_presence
         self.client = None
         self.device_ids: list[str] = []
 
@@ -422,7 +424,7 @@ class YotoControl:
 
     async def connect(self, device_ids: list[str]):
         from yoto_api.mqtt.client import YotoMqttClient
-        from yoto_api.models.event import EventPatch
+        from yoto_api.models.event import EventPatch, PresenceEvent
 
         if self.client:
             await self.client.disconnect()
@@ -435,8 +437,12 @@ class YotoControl:
             log.info("MQTT %s %s: %s", type(msg).__name__, getattr(msg, "player_id", "?"),
                      {k: getattr(v, "value", v) for k, v in (getattr(msg, "fields", None) or vars(msg)).items()
                       if k not in ("player_id",)})
-            if isinstance(msg, EventPatch):
-                # yoto-api renames keys to snake_case; map back to the wire names the rest of the bridge uses.
+            if isinstance(msg, PresenceEvent):
+                if self.on_presence:
+                    self.on_presence(msg.player_id, msg.is_online)
+            elif isinstance(msg, EventPatch):
+                if self.on_presence:
+                    self.on_presence(msg.player_id, True)
                 f = msg.fields
                 ev = {"cardId": f.get("card_id"), "position": f.get("position"), "trackLength": f.get("track_length"),
                       "playbackStatus": getattr(f.get("playback_status"), "value", f.get("playback_status")),
