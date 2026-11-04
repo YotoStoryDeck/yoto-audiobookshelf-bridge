@@ -804,17 +804,19 @@ async def api_status(request):
                         log.debug("Yoto card_detail lookup notice for %s: %s", card_id, ce)
 
                 if card_info:
-                    now_playing = card_info.get("title") or "Yoto Card"
-                    meta = card_info.get("metadata") or {}
+                    c_inner = card_info.get("card") or card_info
+                    now_playing = c_inner.get("title") or card_info.get("title") or "Yoto Card"
+                    meta = c_inner.get("metadata") or card_info.get("metadata") or {}
+                    content_obj = c_inner.get("content") or card_info.get("content") or {}
                     author = meta.get("author") or meta.get("authorName")
-                    cover = meta.get("cover") or card_info.get("content", {}).get("cover") or {}
+                    cover = meta.get("cover") or content_obj.get("cover") or {}
                     cover_url = cover.get("imageL") or cover.get("imageM")
                     if not duration and meta.get("media", {}).get("duration"):
                         duration = round(float(meta["media"]["duration"]))
 
                     # Resolve specific chapter title if not in MQTT event
                     if not chapter_title:
-                        chs = card_info.get("content", {}).get("chapters", [])
+                        chs = content_obj.get("chapters", [])
                         ch_match = next((c for c in chs if str(c.get("key")) == str(ev.get("chapterKey"))), None)
                         if ch_match:
                             chapter_title = ch_match.get("title")
@@ -1073,7 +1075,9 @@ async def api_play(request):
     device_id = body.get("device_id")
     card_id = body.get("card_id")
     item_id = body.get("item_id")
-    track = int(body.get("track") or body.get("chapter") or 1)
+    raw_track = body.get("track") if body.get("track") is not None else body.get("chapter")
+    explicit_track = int(raw_track) if (raw_track is not None and str(raw_track).strip() != "" and int(raw_track) > 0) else None
+    track = explicit_track or 1
 
     if not device_id:
         raise web.HTTPBadRequest(text="device_id required")
@@ -1109,7 +1113,7 @@ async def api_play(request):
         br.pm.expect(device_id, card_id)
         await br.control.play(device_id, card_id, None, track=track, chapter_key=chapter_key, track_key=track_key)
         log.info("Commanded Yoto %s to play card %s (ch=%s, trk=%s, trackIdx=%d) via MQTT", device_id, card_id, chapter_key, track_key, track)
-        return web.json_response({"ok": True, "type": "yoto", "card_id": card_id, "track": track, "chapter_key": chapter_key, "track_key": track_key, "device_id": device_id})
+        return web.json_response({"ok": True, "type": "yoto", "card_id": card_id, "track": track, "chapter": track, "chapter_key": chapter_key, "track_key": track_key, "device_id": device_id})
 
     # 2. Audiobookshelf Book Playback
     if not item_id:
@@ -1138,19 +1142,58 @@ async def api_play(request):
     br.store.save()
     if br.chapter_mode(slot):
         await br.save_playlist(slot, cover=False)    # the remote playlist's tracks follow the book's chapters
-    seconds_in = None
-    if br.cfg.resume_mode == "seconds_in":
+
+    duration, ch_list = await br.book_info(item_id)
+    chapter_title = ""
+    resumed_chapter = 1
+    resumed_pos = 0
+
+    if explicit_track is not None and ch_list and 1 <= explicit_track <= len(ch_list):
+        # User explicitly tapped a specific chapter row's Play button: seek ABS progress to that chapter's start
+        ch_obj = ch_list[explicit_track - 1]
+        target_sec = float(ch_obj.get("start") or 0.0)
+        chapter_title = ch_obj.get("title") or f"Chapter {explicit_track}"
+        resumed_chapter = explicit_track
+        resumed_pos = int(round(target_sec))
+        await br.abs.patch_progress(item_id, target_sec, duration, player_key)
+        br.pm.exact_next.add(slot.slot)
+        seconds_in = int(target_sec) if br.cfg.resume_mode == "seconds_in" else None
+        if br.chapter_mode(slot):
+            track = chapter_tracks.track_for(slot, item_id, target_sec + 0.1) or explicit_track
+        else:
+            track = 1
+    else:
+        # User tapped 'Play Book' (no chapter specified): resume where the profile/player left off in ABS!
         prog = await br.abs.progress(item_id, player_key) or {}
-        seconds_in = max(0, int(prog.get("currentTime") or 0) - br.cfg.rewind_seconds)
-    track = 1
-    if br.chapter_mode(slot):
-        prog = await br.abs.progress(item_id, player_key) or {}
-        duration, _ = await br.book_info(item_id)
-        at = br.pm._resume_point(float(prog.get("currentTime") or 0), duration)
-        track = chapter_tracks.track_for(slot, item_id, at) or 1
+        raw_pos = float(prog.get("currentTime") or 0.0)
+        if prog.get("isFinished") and duration and raw_pos >= max(0.0, duration - 5.0):
+            raw_pos = 0.0
+        at = br.pm._resume_point(raw_pos, duration)
+        resumed_pos = int(round(at))
+        seconds_in = max(0, int(raw_pos) - br.cfg.rewind_seconds) if br.cfg.resume_mode == "seconds_in" else None
+        if ch_list:
+            for idx_c, c_item in enumerate(ch_list):
+                c_start = float(c_item.get("start") or 0.0)
+                c_end = float(c_item.get("end") or duration or 0.0)
+                if c_start <= at < c_end:
+                    resumed_chapter = idx_c + 1
+                    chapter_title = c_item.get("title") or f"Chapter {resumed_chapter}"
+                    break
+        if br.chapter_mode(slot):
+            track = chapter_tracks.track_for(slot, item_id, at) or 1
+        else:
+            track = 1
+
     br.pm.expect(device_id, slot.yoto_card_id)
     await br.control.play(device_id, slot.yoto_card_id, seconds_in, track=track)
-    return web.json_response({"ok": True, "title": slot.title})
+    return web.json_response({
+        "ok": True,
+        "title": slot.title,
+        "track": track,
+        "chapter": resumed_chapter,
+        "chapter_title": chapter_title,
+        "position": resumed_pos
+    })
 
 
 SEEK_ACTIONS = ("back30", "fwd30", "prev", "next")
