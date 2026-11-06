@@ -730,7 +730,18 @@ async def _respond(request, br: Bridge, slot, opener, head_length) -> web.Stream
 # ---------------------------------------------------------------- JSON API for the phone page
 
 def require_pin(request: web.Request):
-    pin = request.app[BRIDGE].cfg.ui_pin
+    br: Bridge = request.app[BRIDGE]
+    # Allow programmatic requests authenticated with valid Bridge API Key
+    if br.cfg.api_key:
+        provided_key = request.headers.get("X-Api-Key") or request.headers.get("X-API-KEY")
+        if not provided_key:
+            auth_hdr = request.headers.get("Authorization", "")
+            if auth_hdr.startswith("Bearer "):
+                provided_key = auth_hdr[7:].strip()
+        if provided_key and hmac.compare_digest(provided_key.strip(), br.cfg.api_key.strip()):
+            return
+
+    pin = br.cfg.ui_pin
     if pin and request.headers.get("X-Pin") != pin:
         raise web.HTTPUnauthorized(text="PIN required")
 
